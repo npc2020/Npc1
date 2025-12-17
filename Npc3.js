@@ -637,7 +637,16 @@ class SkinChromaEnhancer {
         
         const chromas = skinData.childSkins || [];
         if (chromas.length === 0) return;
-        
+
+chromas.forEach((chroma, index) => {
+  if (!chroma.colors || !Array.isArray(chroma.colors) || chroma.colors.length === 0) {
+    chroma.colors = [
+      `hsl(${(index * 60) % 360}, 70%, 50%)`,
+      `hsl(${(index * 60 + 30) % 360}, 80%, 40%)`
+    ];
+  }
+});        
+
         const flyout = document.createElement('div');
         flyout.className = 'chroma-enhancer-flyout';
         flyout.id = 'chroma-enhancer-flyout';
@@ -674,7 +683,7 @@ class SkinChromaEnhancer {
     }
     
     createNativePanelHTML(skinData, chromas) {
-        const previewPath = skinData.chromaPreviewPath || skinData.splashPath || skinData.tilePath || '';
+        const previewPath = skinData.chromaPreviewPath || skinData.tilePath || '';
         
         return `
             <div class="chroma-native-border"></div>
