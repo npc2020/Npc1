@@ -1,21 +1,169 @@
-console.log("[NpcSkinID] Plugin loaded");
-
-const LOG_PREFIX = "[NpcSkinID]";
-
 let userInfo = null;
 let currentRoomId = null;
-let riotWs = null;
 let lastSkinData = null;
 let sendMessageTimeout = null;
 let lastMessageData = null;
+let isInChampSelect = false;
+let gameflowWs = null;
+let chatInitRetryCount = 0;
+const MAX_CHAT_RETRY = 3;
+let skinDataCache = new Map();
+let originalConsoleLog = null;
+let originalConsoleInfo = null;
+let isConsoleInterceptorActive = false;
 
-// ============ 控制台拦截器 ============
-(function setupSkinInterceptor() {
-  const originalLog = console.log;
-  const originalInfo = console.info;
+// 图片切换缩放效果函数
+function changeImageWithZoomEffect(imgElement, newSrc, options = {}) {
+    const {
+        zoomLevel = 1.5,
+        duration = 1000,
+        fadeOutOpacity = 0.1
+    } = options;
+    
+    if (!imgElement) return Promise.reject('No image element');
+    
+    return new Promise((resolve, reject) => {
+        const originalTransition = imgElement.style.transition;
+        const originalTransform = imgElement.style.transform;
+        const originalOpacity = imgElement.style.opacity;
+        
+        imgElement.style.transition = `opacity ${duration/2}ms ease-in-out`;
+        imgElement.style.opacity = fadeOutOpacity;
+        
+        const tempImg = new Image();
+        tempImg.src = newSrc;
+        
+        tempImg.onload = function() {
+            setTimeout(() => {
+                imgElement.src = newSrc;
+                
+                imgElement.style.transition = `all ${duration}ms cubic-bezier(0.34, 1.56, 0.64, 1)`;
+                imgElement.style.transformOrigin = 'center center';
+                imgElement.style.willChange = 'transform, opacity';
+                
+                imgElement.style.opacity = '0.6';
+                imgElement.style.transform = `scale(${zoomLevel})`;
+                
+                requestAnimationFrame(() => {
+                    imgElement.style.opacity = '1';
+                    imgElement.style.transform = 'scale(1)';
+                    
+                    setTimeout(() => {
+                        imgElement.style.transition = originalTransition;
+                        imgElement.style.transform = originalTransform;
+                        imgElement.style.opacity = originalOpacity;
+                        imgElement.style.willChange = '';
+                        resolve();
+                    }, duration + 100);
+                });
+            }, duration/2);
+        };
+        
+        tempImg.onerror = () => {
+            imgElement.style.opacity = '1';
+            imgElement.style.transform = 'scale(1)';
+            imgElement.style.transition = originalTransition;
+            reject('Image load failed');
+        };
+    });
+}
+
+async function fetchSkinData() {
+  try {
+    const response = await fetch('https://lol.qq.com/act/AutoCMS/publish/LCU/ChampSelect/ChampSelect.js');
+    const text = await response.text();
+    const jsonObjects = [];
+    const pattern = /\{[^{}]*"id"[^{}]*\}/g;
+    const matches = text.match(pattern);
+    
+    if (matches) {
+      for (const match of matches) {
+        try {
+          const skin = JSON.parse(match);
+          if (skin.id && skin.splashPath) {
+            jsonObjects.push(skin);
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+    }
+    
+    if (jsonObjects.length > 0) {
+      skinDataCache.clear();
+      jsonObjects.forEach(skin => {
+        skinDataCache.set(skin.id, {
+          emblemPath: skin.emblemPath || '',
+          name: skin.name || '',
+          splashPath: skin.splashPath
+        });
+      });
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+function changeChampSelectBackground(skinId) {
+  const skinInfo = skinDataCache.get(skinId);
+  if (!skinInfo) {
+    return false;
+  }
+  
+  let successCount = 0;
+  
+  // ============ 1. 修改背景大图（使用缩放效果） ============
+  if (skinInfo.splashPath) {
+    const previewImg = document.querySelector('.lol-uikit-background-switcher-image');
+    if (previewImg) {
+      changeImageWithZoomEffect(
+        previewImg,
+        skinInfo.splashPath,
+        {
+          zoomLevel: 1.6,
+          duration: 1200,
+          fadeOutOpacity: 0.05
+        }
+      );
+      successCount++;
+    }
+  }
+  
+  // ============ 2. 修改emblem图标 ============
+  if (skinInfo.emblemPath) {
+    const emblemImg = document.querySelector('#t-champion-splash-emblem-overlay img');
+    if (emblemImg) {
+      emblemImg.src = skinInfo.emblemPath;
+      successCount++;
+    } else {
+      const emblemElements = document.querySelectorAll('.champion-splash-emblem-overlay img');
+      if (emblemElements.length > 0) {
+        emblemElements.forEach(img => {
+          img.src = skinInfo.emblemPath;
+        });
+        successCount++;
+      }
+    }
+  }
+  
+  return successCount > 0;
+}
+
+function enableConsoleInterceptor() {
+  if (isConsoleInterceptorActive) return;
+  
+  if (!originalConsoleLog) {
+    originalConsoleLog = console.log;
+  }
+  if (!originalConsoleInfo) {
+    originalConsoleInfo = console.info;
+  }
   
   console.log = function(...args) {
-    const result = originalLog.apply(console, args);
+    const result = originalConsoleLog.apply(console, args);
     
     if (args[0] && typeof args[0] === 'string') {
       const text = args[0];
@@ -29,56 +177,45 @@ let lastMessageData = null;
   };
   
   console.info = function(...args) {
-    const result = originalInfo.apply(console, args);
+    const result = originalConsoleInfo.apply(console, args);
     
-    if (args[0] && typeof args[0] === 'string' && args[0].includes('[LOG_INFO]')) {
+    if (args[0] && typeof args[0] === 'string' && 
+        args[0].includes('[LOG_INFO]') && 
+        (args.some(arg => typeof arg === 'object' && arg.id) || 
+         args.some(arg => typeof arg === 'string' && arg.includes('skin:')))) {
       fastParseSkin(args);
     }
     
     return result;
   };
-})();
+  
+  isConsoleInterceptorActive = true;
+}
 
-// 快速解析皮肤信息
+function disableConsoleInterceptor() {
+  if (!isConsoleInterceptorActive) return;
+  
+  if (originalConsoleLog) {
+    console.log = originalConsoleLog;
+  }
+  if (originalConsoleInfo) {
+    console.info = originalConsoleInfo;
+  }
+  
+  isConsoleInterceptorActive = false;
+}
+
 function fastParseSkin(args) {
   try {
-    // 找对象参数
     for (const arg of args) {
       if (arg && typeof arg === 'object' && arg.id && arg.name) {
         handleSkinData(arg);
         return;
       }
     }
-    
-    // 从字符串提取
-    const text = args.join(' ');
-    if (text.includes('{') && text.includes('}')) {
-      const start = text.indexOf('{');
-      const end = text.indexOf('}', start) + 1;
-      if (end > start) {
-        const jsonStr = text.substring(start, end);
-        try {
-          const data = JSON.parse(jsonStr);
-          if (data.id && data.name) {
-            handleSkinData(data);
-            return;
-          }
-        } catch (e) {
-          const idMatch = jsonStr.match(/"id":\s*(\d+)/);
-          const nameMatch = jsonStr.match(/"name":\s*"([^"]+)"/);
-          if (idMatch && nameMatch) {
-            handleSkinData({
-              id: parseInt(idMatch[1]),
-              name: nameMatch[1]
-            });
-          }
-        }
-      }
-    }
   } catch (e) {}
 }
 
-// 处理皮肤数据
 function handleSkinData(skinData) {
   const skinId = skinData.id;
   const skinName = skinData.name;
@@ -87,90 +224,200 @@ function handleSkinData(skinData) {
   
   const cleanName = skinName.replace(/\s*\(.*?\)\s*/g, "").trim();
   
-  // 去重
   if (lastSkinData && 
       lastSkinData.id === skinId && 
       lastSkinData.name === cleanName) {
     return;
   }
   
-  // 更新数据
   lastSkinData = { 
     id: skinId, 
     name: cleanName, 
     time: Date.now() 
   };
   
-  // 智能防抖发送消息
+  if (skinDataCache.has(skinId)) {
+    changeChampSelectBackground(skinId);
+  }
+  
   smartDebounceSendMessage(cleanName, skinId);
 }
 
-// ============ 智能防抖发送消息 ============
 function smartDebounceSendMessage(skinName, skinId) {
-  // 保存最后一次的数据
   lastMessageData = { skinName, skinId };
   
-  // 清除之前的定时器
   if (sendMessageTimeout) {
     clearTimeout(sendMessageTimeout);
   }
-  
-  // 智能计算防抖时间
-  const now = Date.now();
-  const timeSinceLast = lastSkinData ? now - lastSkinData.time : 1000;
-  
-  // 动态防抖时间
-  const debounceTime = timeSinceLast < 500 ? 400 : 200;
   
   sendMessageTimeout = setTimeout(() => {
     if (lastMessageData) {
       sendSkinMessage(lastMessageData.skinName, lastMessageData.skinId);
       lastMessageData = null;
     }
-  }, debounceTime);
+  }, 900);
 }
 
-// ============ 聊天功能 ============
-function initLolConnection() {
-  fetch('/lol-chat/v1/me')
-    .then(r => r.json())
-    .then(data => {
-      userInfo = data;
-    })
-    .catch(() => {});
-  
-  const riotLink = document.querySelector('link[rel="riot:plugins:websocket"]');
-  if (riotLink) {
-    riotWs = new WebSocket(riotLink.href, 'wamp');
+function setupGameflowMonitor() {
+  try {
+    const wsLink = document.querySelector('link[rel="riot:plugins:websocket"]');
+    if (!wsLink) {
+      setTimeout(setupGameflowMonitor, 1000);
+      return;
+    }
     
-    riotWs.onopen = () => {
-      riotWs.send(JSON.stringify([5, 'OnJsonApiEvent_lol-chat_v1_conversations']));
+    const uri = wsLink.href;
+    gameflowWs = new WebSocket(uri, 'wamp');
+    
+    gameflowWs.onopen = () => {
+      gameflowWs.send(JSON.stringify([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]));
     };
     
-    riotWs.onmessage = (msg) => {
+    gameflowWs.onmessage = (message) => {
       try {
-        const data = JSON.parse(msg.data);
-        if (data[2]?.data?.body === 'joined_room') {
-          const match = data[2].uri.match(/\/lol-chat\/v1\/conversations\/(.+)\/messages/);
-          if (match) {
-            currentRoomId = match[1];
+        const data = JSON.parse(message.data);
+        
+        if (data && Array.isArray(data) && data.length >= 2) {
+          const eventType = data[0];
+          const eventName = data[1];
+          
+          if (eventType === 8 && eventName === "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase") {
+            const eventData = data[2];
+            if (eventData && eventData.data) {
+              const phase = eventData.data;
+              
+              const wasInChampSelect = isInChampSelect;
+              isInChampSelect = phase === "ChampSelect";
+              
+              if (wasInChampSelect !== isInChampSelect) {
+                if (isInChampSelect && !wasInChampSelect) {
+                  enableConsoleInterceptor();
+                  resetForNewChampSelect();
+                  chatInitRetryCount = 0;
+                  setTimeout(() => initLolConnection(), 1000);
+                } else if (!isInChampSelect && wasInChampSelect) {
+                  disableConsoleInterceptor();
+                  cleanupAfterChampSelect();
+                }
+              }
+            }
           }
         }
-      } catch (e) {}
+      } catch (error) {}
     };
+    
+    gameflowWs.onerror = () => {};
+    
+    gameflowWs.onclose = () => {
+      setTimeout(setupGameflowMonitor, 5000);
+    };
+    
+  } catch (error) {
+    setTimeout(setupGameflowMonitor, 5000);
+  }
+}
+
+function resetForNewChampSelect() {
+  lastSkinData = null;
+  lastMessageData = null;
+  userInfo = null;
+  currentRoomId = null;
+  
+  if (sendMessageTimeout) {
+    clearTimeout(sendMessageTimeout);
+    sendMessageTimeout = null;
+  }
+}
+
+function cleanupAfterChampSelect() {
+  lastSkinData = null;
+  lastMessageData = null;
+  
+  if (sendMessageTimeout) {
+    clearTimeout(sendMessageTimeout);
+    sendMessageTimeout = null;
+  }
+}
+
+async function initLolConnection() {
+  try {
+    if (chatInitRetryCount >= MAX_CHAT_RETRY) {
+      return;
+    }
+    
+    chatInitRetryCount++;
+    
+    const userResponse = await fetch('/lol-chat/v1/me');
+    if (!userResponse.ok) {
+      if (chatInitRetryCount < MAX_CHAT_RETRY) {
+        setTimeout(() => {
+          if (isInChampSelect) {
+            initLolConnection();
+          }
+        }, 2000);
+      }
+      return;
+    }
+    
+    userInfo = await userResponse.json();
+    
+    const conversationsResponse = await fetch('/lol-chat/v1/conversations');
+    if (!conversationsResponse.ok) {
+      if (chatInitRetryCount < MAX_CHAT_RETRY) {
+        setTimeout(() => {
+          if (isInChampSelect) {
+            initLolConnection();
+          }
+        }, 2000);
+      }
+      return;
+    }
+    
+    const conversations = await conversationsResponse.json();
+    const champSelectRoom = conversations.find(conv => 
+      conv.type === "championSelect"
+    );
+    
+    if (champSelectRoom) {
+      currentRoomId = champSelectRoom.id;
+      chatInitRetryCount = 0;
+    } else {
+      if (chatInitRetryCount < MAX_CHAT_RETRY) {
+        setTimeout(() => {
+          if (isInChampSelect) {
+            initLolConnection();
+          }
+        }, 2000);
+      }
+    }
+  } catch (error) {
+    if (chatInitRetryCount < MAX_CHAT_RETRY) {
+      setTimeout(() => {
+        if (isInChampSelect) {
+          initLolConnection();
+        }
+      }, 2000);
+    }
   }
 }
 
 async function sendSkinMessage(skinName, skinId) {
-  if (!userInfo || !currentRoomId) {
+  if (!isInChampSelect) {
     return;
+  }
+  
+  if (!userInfo || !currentRoomId) {
+    await initLolConnection();
+    if (!userInfo || !currentRoomId) {
+      return;
+    }
   }
   
   const cleanName = skinName.replace(/\s*\(.*?\)\s*/g, "").trim();
   const messageText = `当前皮肤: ${cleanName} ID:${skinId}`;
   
   try {
-    await fetch(`/lol-chat/v1/conversations/${currentRoomId}/messages`, {
+    const response = await fetch(`/lol-chat/v1/conversations/${currentRoomId}/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -182,25 +429,36 @@ async function sendSkinMessage(skinName, skinId) {
         body: messageText
       })
     });
-  } catch (error) {}
+    
+    if (!response.ok) {
+      if (response.status === 404 || response.status === 400) {
+        userInfo = null;
+        currentRoomId = null;
+        chatInitRetryCount = 0;
+      }
+    }
+  } catch (error) {
+    userInfo = null;
+    currentRoomId = null;
+  }
 }
 
-// ============ 启动 ============
 function start() {
   if (!document.body) {
     setTimeout(start, 100);
     return;
   }
   
-  initLolConnection();
+  fetchSkinData();
+  setupGameflowMonitor();
 }
 
 function stop() {
   if (sendMessageTimeout) clearTimeout(sendMessageTimeout);
-  if (riotWs) riotWs.close();
+  if (gameflowWs) gameflowWs.close();
+  disableConsoleInterceptor();
 }
 
-// 立即启动
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', start);
 } else {
@@ -209,15 +467,11 @@ if (document.readyState === 'loading') {
 
 window.addEventListener("beforeunload", stop);
 
-// ============ 对外接口 - 供解锁脚本调用 ============
 window.NpcSkinMessenger = (function() {
-  // 私有变量，防止外部直接访问
   let isInitialized = false;
   
-  // 初始化检查
   function checkInitialization() {
     if (!isInitialized) {
-      // 检查核心变量是否存在
       if (typeof userInfo === 'undefined' || 
           typeof currentRoomId === 'undefined' ||
           typeof smartDebounceSendMessage === 'undefined') {
@@ -228,7 +482,6 @@ window.NpcSkinMessenger = (function() {
     return true;
   }
   
-  // 清理皮肤名称
   function cleanSkinName(name) {
     if (!name) return '';
     return name
@@ -239,16 +492,9 @@ window.NpcSkinMessenger = (function() {
       .trim();
   }
   
-  // 主接口对象
   return {
-    /**
-     * 发送皮肤消息（供其他脚本调用）
-     * @param {Object} skinInfo - 皮肤信息 {name: string, id: number, isChroma?: boolean}
-     * @returns {boolean} 是否成功处理
-     */
     sendSkinMessage: function(skinInfo) {
       try {
-        // 参数验证
         if (!skinInfo || 
             typeof skinInfo !== 'object' || 
             !skinInfo.name || 
@@ -258,7 +504,6 @@ window.NpcSkinMessenger = (function() {
           return false;
         }
         
-        // 检查初始化状态
         if (!checkInitialization()) {
           return false;
         }
@@ -267,29 +512,14 @@ window.NpcSkinMessenger = (function() {
         const skinName = skinInfo.name;
         const isChroma = !!skinInfo.isChroma;
         
-        // 清理名称
-        const cleanName = cleanSkinName(skinName);
-        
-        // 使用现有的防抖逻辑发送消息
-        if (typeof smartDebounceSendMessage === 'function') {
-          smartDebounceSendMessage(cleanName, skinId, isChroma);
-        } else {
-          // 备用方案：直接发送
-          if (typeof sendSkinMessage === 'function') {
-            sendSkinMessage(cleanName, skinId);
-          } else {
-            return false;
-          }
+        const shouldChangeBg = skinInfo.changeBackground !== false;
+        if (shouldChangeBg) {
+          changeChampSelectBackground(skinId);
         }
         
-        // 更新本地缓存（如果存在）
-        if (typeof lastSkinData !== 'undefined') {
-          lastSkinData = { 
-            id: skinId, 
-            name: cleanName, 
-            time: Date.now(),
-            isChroma: isChroma
-          };
+        const cleanName = cleanSkinName(skinName);
+        if (typeof smartDebounceSendMessage === 'function') {
+          smartDebounceSendMessage(cleanName, skinId, isChroma);
         }
         
         return true;
@@ -299,46 +529,24 @@ window.NpcSkinMessenger = (function() {
       }
     },
     
-    /**
-     * 检查是否已初始化并准备好
-     * @returns {boolean}
-     */
-    isReady: function() {
-      try {
-        return checkInitialization() && 
-               userInfo !== null && 
-               currentRoomId !== null;
-      } catch (e) {
+    changeBackgroundOnly: function(skinId) {
+      if (!skinId || typeof skinId !== 'number') {
         return false;
       }
+      return changeChampSelectBackground(skinId);
     },
     
-    /**
-     * 获取当前连接状态
-     * @returns {Object} 状态信息
-     */
-    getStatus: function() {
-      try {
-        return {
-          initialized: isInitialized,
-          userInfo: !!userInfo,
-          roomId: !!currentRoomId,
-          chatConnected: !!(userInfo && currentRoomId)
-        };
-      } catch (e) {
-        return { initialized: false };
-      }
+    reloadSkinData: function() {
+      return fetchSkinData();
     },
     
-    /**
-     * 手动触发发送（供调试，无日志）
-     * @param {string} name - 皮肤名称
-     * @param {number} id - 皮肤ID
-     * @returns {boolean} 是否成功
-     */
-    testSend: function(name, id) {
-      if (!name || !id) return false;
-      return this.sendSkinMessage({name: name, id: id});
-    }
+    getSkinCacheInfo: function() {
+      return {
+        size: skinDataCache.size,
+        hasSkin: (skinId) => skinDataCache.has(skinId),
+        allSkinIds: Array.from(skinDataCache.keys())
+      };
+    },
+    
   };
 })();
