@@ -1,5 +1,4 @@
 (function enableLockedSkinPreview() {
-  const LOG_PREFIX = "[NPC-UI][skin-preview]";
   const STYLE_ID = "lpp-ui-unlock-skins-css";
   const INLINE_ID = `${STYLE_ID}-inline`;
   const BORDER_CLASS = "lpp-skin-border";
@@ -22,14 +21,12 @@
       transition: filter 0.25s ease;
     }
 
-    /* Hover glow effect for owned skins */
     .skin-selection-carousel .skin-selection-item:not(.disabled):not([aria-disabled="true"]):not(.skin-selection-item-selected):hover .skin-selection-thumbnail {
       filter: brightness(1.2) saturate(1.1) !important;
       -webkit-filter: brightness(1.2) saturate(1.1) !important;
       transition: filter 0.25s ease;
     }
 
-    /* Hover glow effect for unowned skins */
     .skin-selection-carousel .skin-selection-item.disabled:not(.skin-selection-item-selected):hover .skin-selection-thumbnail,
     .skin-selection-carousel .skin-selection-item[aria-disabled="true"]:not(.skin-selection-item-selected):hover .skin-selection-thumbnail {
       filter: brightness(1.2) saturate(1.1) !important;
@@ -73,7 +70,6 @@
       transform: none !important;
     }
 
-    /* 选中的皮肤样式 */
     .skin-selection-carousel-container .skin-selection-carousel .skin-selection-item.skin-selection-item-selected {
       background: #3c3c41 !important;
     }
@@ -83,7 +79,6 @@
       margin: 0 !important;
     }
 
-    /* ============ 完美边框系统（带外发光） ============ */
     .skin-selection-carousel .skin-selection-item {
       position: relative;
       z-index: 1;
@@ -111,7 +106,6 @@
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
 
-    /* 中心位置的金色边框 + 外发光 */
     .skin-selection-carousel .skin-selection-item.skin-carousel-offset-2 .lpp-skin-border {
       border: 2px solid transparent;
       border-image-source: linear-gradient(0deg, #c8aa6e 0%, #c89b3c 44%, #a07b32 59%, #785a28 100%) !important;
@@ -122,7 +116,6 @@
         0 0 24px rgba(200, 170, 110, 0.3) !important;
     }
 
-    /* 悬停的金色边框 + 外发光 */
     .skin-selection-carousel .skin-selection-item:not(.skin-selection-item-selected):hover .lpp-skin-border {
       border: 2px solid transparent;
       border-image-source: linear-gradient(0deg, #c8aa6e 0%, #c89b3c 44%, #a07b32 59%, #785a28 100%) !important;
@@ -133,7 +126,6 @@
         0 0 16px rgba(200, 170, 110, 0.2) !important;
     }
 
-    /* 额外增强：选中的皮肤金色边框外发光效果（确保选中时最亮） */
     .skin-selection-carousel .skin-selection-item.skin-carousel-offset-2.skin-selection-item-selected .lpp-skin-border {
       box-shadow: 
         inset 0 0 0 1px rgba(1, 10, 19, 0.6),
@@ -142,7 +134,6 @@
       animation: gold-glow-pulse 2s infinite ease-in-out !important;
     }
 
-    /* 金色发光脉冲动画 */
     @keyframes gold-glow-pulse {
       0%, 100% {
         box-shadow: 
@@ -160,7 +151,6 @@
       }
     }
 
-    /* Remove grey filters and locks */
     .thumbnail-wrapper {
       filter: grayscale(0) saturate(1) contrast(1) !important;
       -webkit-filter: grayscale(0) saturate(1) contrast(1) !important;
@@ -180,7 +170,6 @@
       pointer-events: none !important;
     }
 
-    /* 炫彩皮肤按钮样式 */
     .chroma-skin-button.locked,
     .chroma-skin-button.purchase-disabled {
       pointer-events: auto !important;
@@ -197,19 +186,11 @@
     }
   `;
 
-  const log = {
-    info: (msg, extra) => console.info(`${LOG_PREFIX} ${msg}`, extra ?? ""),
-    warn: (msg, extra) => console.warn(`${LOG_PREFIX} ${msg}`, extra ?? ""),
-    error: (msg, extra) => console.error(`${LOG_PREFIX} ${msg}`, extra ?? ""),
-  };
-
-  // ============ 重试机制 ============
   let isInitializing = false;
   let isInitialized = false;
   let retryCount = 0;
   const MAX_RETRIES = 20;
   
-  // ============ 炫彩相关变量 ============
   let chromaModalObserver = null;
 
   function injectInlineRules() {
@@ -221,10 +202,8 @@
     styleTag.id = INLINE_ID;
     styleTag.textContent = INLINE_RULES;
     document.head.appendChild(styleTag);
-    log.info("applied inline styling");
   }
 
-  // ============ 边框系统函数 ============
   function ensureBorderFrame(skinItem) {
     if (!skinItem) return;
 
@@ -296,7 +275,6 @@
     markSkinsAsOwned();
   }
 
-  // ============ 从DOM获取当前炫彩信息 ============
   function getCurrentChromaInfo() {
     try {
       const chromaModal = document.querySelector('.champ-select-chroma-modal');
@@ -304,7 +282,6 @@
       
       const info = { id: null, name: null };
       
-      // 从预览图URL提取ID
       const previewImage = chromaModal.querySelector('.chroma-information-image');
       if (previewImage && previewImage.style.backgroundImage) {
         const bgImage = previewImage.style.backgroundImage;
@@ -314,7 +291,6 @@
         }
       }
       
-      // 获取名称
       const skinNameElement = chromaModal.querySelector('.child-skin-name');
       if (skinNameElement) {
         const clone = skinNameElement.cloneNode(true);
@@ -329,7 +305,6 @@
     }
   }
 
-  // ============ 调用皮肤ID脚本接口 ============
   function sendChromaInfoToSkinMessenger() {
     const chromaInfo = getCurrentChromaInfo();
     if (!chromaInfo || !chromaInfo.name) return false;
@@ -344,19 +319,14 @@
     return false;
   }
 
-  // ============ 更新皮肤选择界面中的炫彩按钮颜色 ============
   function updateChromaButtonInSkinSelection(color) {
     try {
-      // 查找当前选中的皮肤项
       const selectedSkinItem = document.querySelector('.skin-selection-item-selected');
       if (!selectedSkinItem) return false;
       
-      // 查找炫彩按钮
       const chromaButton = selectedSkinItem.querySelector('.chroma-skin-button, .skin-chroma-button, [class*="chroma"]');
       if (!chromaButton) return false;
       
-      // 更新颜色
-      // 尝试查找.content或.frame-color .content元素
       let targetElement = chromaButton.querySelector('.content');
       if (!targetElement) {
         const frameColor = chromaButton.querySelector('.frame-color');
@@ -379,10 +349,8 @@
     }
   }
 
-  // ============ 处理普通皮肤 ============
   function handleRegularSkins() {
     try {
-      // 首先确保边框
       document.querySelectorAll(".skin-selection-item").forEach((skinItem) => {
         ensureBorderFrame(skinItem);
         applyOffsetVisibility(skinItem);
@@ -406,11 +374,9 @@
       });
       
     } catch (e) {
-      // 静默处理
     }
   }
 
-  // ============ 处理炫彩皮肤 ============
   function handleChromaSkins() {
     try {
       const chromaModal = document.querySelector('.champ-select-chroma-modal');
@@ -438,7 +404,6 @@
             
             button.innerHTML = `<div class="contents" style="background:${gradient}"></div>`;
             
-            // 点击事件
             button.addEventListener('click', function(e) {
               e.preventDefault();
               e.stopPropagation();
@@ -451,10 +416,8 @@
                 
                 this.classList.add('selected');
                 
-                // 延迟调用接口
                 setTimeout(sendChromaInfoToSkinMessenger, 50);
                 
-                // 更新皮肤选择界面中的炫彩按钮颜色
                 updateChromaButtonInSkinSelection(gradient);
               }
             }, true);
@@ -463,13 +426,10 @@
       });
       
     } catch (e) {
-      // 静默处理
     }
   }
 
-  // ============ 设置观察者 ============
   function setupObservers() {
-    // 完美边框系统的观察者
     const skinObserver = new MutationObserver(() => {
       scanSkinSelection();
       markSkinsAsOwned();
@@ -482,7 +442,6 @@
       attributeFilter: ["class"],
     });
 
-    // 炫彩模态框观察者
     if (chromaModalObserver) chromaModalObserver.disconnect();
     
     chromaModalObserver = new MutationObserver((mutations) => {
@@ -512,7 +471,6 @@
     
     chromaModalObserver.observe(document.body, { childList: true, subtree: true });
 
-    // 定时器
     const intervalId = setInterval(() => {
       scanSkinSelection();
       markSkinsAsOwned();
@@ -546,12 +504,10 @@
 
   function init() {
     if (isInitialized) {
-      log.info("already initialized");
       return;
     }
     
     if (isInitializing) {
-      log.info("initialization in progress");
       return;
     }
     
@@ -560,14 +516,12 @@
     try {
       if (!document || !document.head) {
         if (retryCount >= MAX_RETRIES) {
-          log.error(`Failed to initialize after ${MAX_RETRIES} retries`);
           isInitializing = false;
           retryCount = 0;
           return;
         }
         
         retryCount++;
-        log.info(`Document not ready, retrying (${retryCount}/${MAX_RETRIES})...`);
         
         setTimeout(() => {
           isInitializing = false;
@@ -581,10 +535,8 @@
       setupObservers();
       
       isInitialized = true;
-      log.info("skin preview overrides active");
       
     } catch (error) {
-      log.error("Initialization error:", error);
       isInitialized = false;
     } finally {
       isInitializing = false;
@@ -592,9 +544,7 @@
     }
   }
 
-  // 主启动逻辑
   if (typeof document === "undefined") {
-    log.warn("document unavailable; aborting");
     return;
   }
 
