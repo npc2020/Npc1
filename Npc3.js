@@ -1,15 +1,12 @@
-
 class SkinChromaEnhancer {
     constructor() {
         this.config = {
-            POLL_INTERVAL_MS: 250,
             SKIN_SELECTORS: [
                 ".skin-name-text",
                 ".skin-name",
             ],
-            fetchDebounce: 1000,
-            panelWidth: 320,
-            panelHeight: 320
+            DEBOUNCE_DELAY: 100,
+            WEBSOCKET_RECONNECT_DELAY: 3000
         };
         
         this.state = {
@@ -17,11 +14,11 @@ class SkinChromaEnhancer {
             currentSkinName: null,
             currentSkinData: null,
             skinMap: new Map(),
-            isActive: false,
             isInChampSelect: false,
             lastSkinCheckTime: 0,
             lastLoggedSkin: null,
-            lastProcessedSkinName: null
+            lastProcessedSkinName: null,
+            isWebSocketConnected: false
         };
         
         this.domCache = {
@@ -32,20 +29,72 @@ class SkinChromaEnhancer {
         };
         
         this.timers = {
-            champCheck: null,
-            skinCheck: null,
-            buttonCheck: null
+            buttonCheck: null,
+            webSocketReconnect: null
         };
         
         this.observer = null;
-        this.pollTimer = null;
+        this.webSocket = null;
         
-        this.init();
+        this.debounceTimer = null;
+        
+        this.delayedInit();
+    }
+    
+    delayedInit() {
+        if (this.checkIfInChampSelect()) {
+            this.init();
+        } else {
+            this.waitForChampSelect();
+        }
+    }
+    
+    checkIfInChampSelect() {
+        return document.querySelector('.champion-select') !== null ||
+               document.querySelector('.skin-selection-carousel') !== null ||
+               document.querySelector('.skin-selection-item') !== null ||
+               document.querySelector('.skin-name-text') !== null ||
+               document.querySelector('.skin-name') !== null;
+    }
+    
+    waitForChampSelect() {
+        const champSelectObserver = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                if (mutation.type === 'childList') {
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === 1) {
+                            const isChampSelectElement = 
+                                (node.classList && 
+                                 (node.classList.contains('champion-select') || 
+                                  node.classList.contains('skin-selection-carousel') ||
+                                  node.classList.contains('skin-selection-item'))) ||
+                                (node.querySelector && 
+                                 (node.querySelector('.champion-select') || 
+                                  node.querySelector('.skin-selection-carousel') ||
+                                  node.querySelector('.skin-selection-item')));
+                            
+                            if (isChampSelectElement) {
+                                champSelectObserver.disconnect();
+                                setTimeout(() => this.init(), 300);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        champSelectObserver.observe(document.body, { 
+            childList: true, 
+            subtree: true 
+        });
+        
+        setTimeout(() => champSelectObserver.disconnect(), 30000);
     }
     
     init() {
         this.injectStyles();
-        this.startMonitoring();
+        this.connectWebSocket();
     }
     
     injectStyles() {
@@ -64,8 +113,6 @@ class SkinChromaEnhancer {
                 transform: translateX(-50%) translateY(50%);
                 width: 25px;
                 z-index: 10;
-                border: 2px solid #90EE90 !important;  /* 边框，便于调试 #98FB98 #90EE90  */
-                border-radius: 50%;
             }
             
             .chroma-btn-outer {
@@ -128,8 +175,8 @@ class SkinChromaEnhancer {
                 flex-direction: column;
                 width: 305px;
                 position: relative;
-                max-height: 420px;
-                min-height: 355px;
+                max-height: 370px;
+                min-height: 370px;
             }
             
             .chroma-native-border {
@@ -157,7 +204,7 @@ class SkinChromaEnhancer {
                 background-image: url('lol-game-data/assets/content/src/LeagueClient/GameModeAssets/Classic_SRU/img/champ-select-flyout-background.jpg');
                 border-bottom: thin solid #463714;
                 flex-grow: 1;
-                height: 315px;
+                height: 316px;
                 position: relative;
                 width: 100%;
                 z-index: 1;
@@ -174,18 +221,18 @@ class SkinChromaEnhancer {
                 top: 0;
             }
             
-            .chroma-native-skin-name {
-                bottom: 10px;
-                color: #f7f0de;
-                font-family: "LoL Display", "Times New Roman", Times, serif;
-                font-size: 14px !important;
-                line-height: 1.2 !important;
-                font-weight: 700;
-                position: absolute;
-                text-align: center;
-                width: 100%;
-                text-shadow: 0 2px 4px rgba(0,0,0,0.8);
-            }
+        .chroma-native-skin-name {
+            bottom: 10px; 
+            color: #f7f0de;
+            font-family: "LoL Display", "LoL Display CN", "Times New Roman", Times, Baskerville, Georgia, serif;
+            font-size: 20px !important; 
+            line-height: normal !important; 
+            font-weight: 700; 
+            position: absolute;
+            text-align: center;
+            width: 100%;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
             
             .chroma-native-selection {
                 pointer-events: all;
@@ -194,7 +241,7 @@ class SkinChromaEnhancer {
                 flex-direction: row;
                 flex-wrap: wrap;
                 justify-content: center;
-                min-height: 40px;
+                min-height: 54px;
                 padding: 8px 0;
                 width: 100%;
                 position: relative;
@@ -306,15 +353,70 @@ class SkinChromaEnhancer {
     }
     
     cleanSkinName(skinName) {
-        const cleanName = skinName.replace(/\s*\(.*?\)\s*/g, "").trim();
-        return cleanName;
+        return skinName.replace(/\s*\(.*?\)\s*/g, "").trim();
+    }
+    
+    connectWebSocket() {
+        if (this.timers.webSocketReconnect) {
+            clearTimeout(this.timers.webSocketReconnect);
+        }
+        
+        try {
+            const wsLink = document.querySelector('link[rel="riot:plugins:websocket"]');
+            if (!wsLink) {
+                this.timers.webSocketReconnect = setTimeout(() => this.connectWebSocket(), 1000);
+                return;
+            }
+            
+            const uri = wsLink.href;
+            this.webSocket = new WebSocket(uri, 'wamp');
+            
+            this.webSocket.onopen = () => {
+                this.state.isWebSocketConnected = true;
+                
+                this.startMonitoring();
+                
+                const subscribeMsg = JSON.stringify([5, "OnJsonApiEvent_lol-champ-select_v1_skin-carousel-skins"]);
+                this.webSocket.send(subscribeMsg);
+            };
+            
+            this.webSocket.onmessage = (message) => {
+                try {
+                    const data = JSON.parse(message.data);
+                    
+                    if (data && Array.isArray(data) && data.length >= 2) {
+                        const eventType = data[0];
+                        const eventName = data[1];
+                        
+                        if (eventType === 8 && eventName === "OnJsonApiEvent_lol-champ-select_v1_skin-carousel-skins") {
+                            const eventData = data[2];
+                            if (eventData && eventData.data) {
+                                this.processSkinDataFromWebSocket(eventData.data);
+                            }
+                        }
+                    }
+                } catch (error) {}
+            };
+            
+            this.webSocket.onerror = () => {
+                this.state.isWebSocketConnected = false;
+                this.timers.webSocketReconnect = setTimeout(() => this.connectWebSocket(), 5000);
+            };
+            
+            this.webSocket.onclose = () => {
+                this.state.isWebSocketConnected = false;
+                this.timers.webSocketReconnect = setTimeout(() => this.connectWebSocket(), 3000);
+            };
+            
+        } catch (error) {
+            this.state.isWebSocketConnected = false;
+            this.timers.webSocketReconnect = setTimeout(() => this.connectWebSocket(), 5000);
+        }
     }
     
     startMonitoring() {
         if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", () => {
-                this.start();
-            });
+            document.addEventListener("DOMContentLoaded", () => this.start());
             return;
         }
         
@@ -328,12 +430,6 @@ class SkinChromaEnhancer {
         }
         
         this.setupObservers();
-        
-        this.checkState();
-        
-        this.timers.skinCheck = setInterval(() => {
-            this.checkState();
-        }, this.config.POLL_INTERVAL_MS);
     }
     
     setupObservers() {
@@ -348,9 +444,48 @@ class SkinChromaEnhancer {
         this.observer.observe(document.body, {
             childList: true,
             subtree: true,
-            attributes: true,
-            characterData: true
+            attributes: false,
+            characterData: false
         });
+    }
+    
+    processSkinDataFromWebSocket(skinsData) {
+        if (!skinsData || !Array.isArray(skinsData)) {
+            return;
+        }
+        
+        this.state.skinMap.clear();
+        
+        const filteredSkins = skinsData.filter(skin => {
+            const isOwned = skin.ownership?.owned || skin.unlocked === true;
+            const isUnowned = !isOwned;
+            const hasChromas = skin.childSkins && skin.childSkins.length > 0;
+            return isUnowned && hasChromas;
+        });
+        
+        filteredSkins.forEach(skin => {
+            const cleanedName = this.cleanSkinName(skin.name);
+            if (cleanedName) {
+                this.state.skinMap.set(cleanedName, skin);
+            }
+        });
+        
+        if (this.state.currentSkinName) {
+            const skinData = this.state.skinMap.get(this.state.currentSkinName);
+            if (skinData) {
+                this.state.currentSkinData = skinData;
+                this.tryAttachChromaButton(skinData);
+            } else {
+                this.removeChromaButton();
+            }
+        }
+        
+        setTimeout(() => {
+            const skinName = this.readCurrentSkin();
+            if (skinName) {
+                this.processSkinChange(skinName);
+            }
+        }, 500);
     }
     
     async checkState() {
@@ -365,18 +500,6 @@ class SkinChromaEnhancer {
         
         if (!this.state.isInChampSelect) {
             this.state.isInChampSelect = true;
-            
-            if (!this.timers.skinCheck) {
-                this.timers.skinCheck = setInterval(() => {
-                    this.checkState();
-                }, this.config.POLL_INTERVAL_MS);
-            }
-            
-            if (!this.observer) {
-                this.setupObservers();
-            }
-            
-            await this.checkCurrentChampion();
         }
         
         if (skinName !== this.state.lastLoggedSkin) {
@@ -385,64 +508,21 @@ class SkinChromaEnhancer {
         }
     }
     
-    async checkCurrentChampion() {
-        try {
-            const response = await fetch('/lol-champ-select/v1/current-champion');
-            
-            if (!response.ok) {
-                return;
-            }
-            
-            const championId = await response.json();
-            
-            if (championId === 0) {
-                if (this.state.currentChampionId !== null) {
-                    this.resetState();
-                }
-                return;
-            }
-            
-            if (championId === this.state.currentChampionId) {
-                return;
-            }
-            
-            this.state.currentChampionId = championId;
-            this.state.isActive = true;
-            
-            await this.fetchAndProcessSkinData();
-            
-        } catch (error) {
-        }
-    }
-    
-    async fetchAndProcessSkinData() {
-        try {
-            const response = await fetch('/lol-champ-select/v1/skin-carousel-skins');
-            if (!response.ok) return;
-            
-            const skins = await response.json();
-            
-            const unownedSkins = skins.filter(skin => {
-                const isOwned = skin.ownership?.owned || skin.unlocked === true;
-                return !isOwned;
-            });
-            
-            this.state.skinMap.clear();
-            unownedSkins.forEach(skin => {
-                const cleanedName = this.cleanSkinName(skin.name);
-                if (cleanedName) {
-                    this.state.skinMap.set(cleanedName, skin);
-                }
-            });
-        } catch (error) {
-        }
-    }
-    
     async processSkinChange(skinName) {
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+        }
+        
+        this.debounceTimer = setTimeout(async () => {
+            await this._processSkinChange(skinName);
+        }, this.config.DEBOUNCE_DELAY);
+    }
+    
+    async _processSkinChange(skinName) {
         const cleanedName = this.cleanSkinName(skinName);
         this.state.currentSkinName = cleanedName;
         
-        const skinData = this.findSkinDataByName(cleanedName);
+        const skinData = this.state.skinMap.get(cleanedName);
         
         if (!skinData) {
             this.removeChromaButton();
@@ -451,14 +531,9 @@ class SkinChromaEnhancer {
         
         this.state.currentSkinData = skinData;
         
-        const hasChromas = skinData.childSkins && skinData.childSkins.length > 0;
+        await this.delay(150);
         
-        if (hasChromas) {
-            await this.delay(100);
-            this.tryAttachChromaButton(skinData);
-        } else {
-            this.removeChromaButton();
-        }
+        this.tryAttachChromaButton(skinData);
     }
     
     delay(ms) {
@@ -593,37 +668,18 @@ class SkinChromaEnhancer {
         return button;
     }
     
-    findSkinDataByName(skinName) {
-        for (let [key, value] of this.state.skinMap) {
-            if (this.cleanSkinName(key) === skinName) {
-                return value;
-            }
-        }
-        
-        for (let [key, value] of this.state.skinMap) {
-            const cleanedKey = this.cleanSkinName(key);
-            if (cleanedKey.includes(skinName) || skinName.includes(cleanedKey)) {
-                return value;
-            }
-        }
-        
-        return null;
-    }
-    
     removeChromaButton() {
         if (this.domCache.activeChromaButton) {
             try {
                 this.domCache.activeChromaButton.remove();
-            } catch (e) {
-            }
+            } catch (e) {}
             this.domCache.activeChromaButton = null;
         }
         
         document.querySelectorAll('.chroma-enhancer-button').forEach(btn => {
             try {
                 btn.remove();
-            } catch (e) {
-            }
+            } catch (e) {}
         });
         
         if (this.timers.buttonCheck) {
@@ -637,16 +693,7 @@ class SkinChromaEnhancer {
         
         const chromas = skinData.childSkins || [];
         if (chromas.length === 0) return;
-
-chromas.forEach((chroma, index) => {
-  if (!chroma.colors || !Array.isArray(chroma.colors) || chroma.colors.length === 0) {
-    chroma.colors = [
-      `hsl(${(index * 60) % 360}, 70%, 50%)`,
-      `hsl(${(index * 60 + 30) % 360}, 80%, 40%)`
-    ];
-  }
-});        
-
+        
         const flyout = document.createElement('div');
         flyout.className = 'chroma-enhancer-flyout';
         flyout.id = 'chroma-enhancer-flyout';
@@ -698,21 +745,21 @@ chromas.forEach((chroma, index) => {
             </div>
         `;
     }
-    
+
     createNativeChromaOptionsHTML(skinData, chromas) {
         let html = '';
         
-        // 基础皮肤 - 使用固定的渐变色（金红色渐变）
-        html += `
-            <li>
-                <div class="chroma-native-button selected" data-id="${skinData.id}" data-name="${skinData.name}" data-is-chroma="false">
-                    <div class="native-contents" style="background:linear-gradient(135deg, #f0e6d2 0%, #f0e6d2 48%, #be1e37 48%, #be1e37 52%, #f0e6d2 52%, #f0e6d2 100%)"></div>
-                </div>
-            </li>
-        `;
+        if (skinData.productType === null) {
+            html += `
+                <li>
+                    <div class="chroma-native-button selected" data-id="${skinData.id}" data-name="${skinData.name}" data-is-chroma="false">
+                        <div class="native-contents" style="background:linear-gradient(135deg, #f0e6d2 0%, #f0e6d2 48%, #be1e37 48%, #be1e37 52%, #f0e6d2 52%, #f0e6d2 100%)"></div>
+                    </div>
+                </li>
+            `;
+        }
         
-        // 炫彩皮肤 - 保持原有的渐变色
-        chromas.forEach(chroma => {
+        chromas.forEach((chroma, index) => {
             const colors = chroma.colors || [];
             
             let colorStyle = '#555';
@@ -721,12 +768,33 @@ chromas.forEach((chroma, index) => {
             } else if (colors.length === 1) {
                 colorStyle = colors[0];
             } else {
-                colorStyle = 'linear-gradient(135deg, #f0e6d2 0%, #f0e6d2 48%, #be1e37 48%, #be1e37 52%, #f0e6d2 52%, #f0e6d2 100%)';
+                if (skinData.productType !== null) {
+                    const presetColors = [
+                        ['#FF6B6B', '#4ECDC4'],
+                        ['#45B7D1', '#96C93D'],
+                        ['#FECA57', '#FF9FF3'],
+                        ['#54A0FF', '#5F27CD'],
+                        ['#00D2D3', '#FF9F43'],
+                        ['#EE5A24', '#009432'],
+                    ];
+                    const colorPair = presetColors[index % presetColors.length];
+                    colorStyle = `linear-gradient(135deg, ${colorPair[0]} 0%, ${colorPair[0]} 50%, ${colorPair[1]} 50%, ${colorPair[1]} 100%)`;
+                } else {
+                    colorStyle = 'linear-gradient(135deg, #f0e6d2 0%, #f0e6d2 48%, #be1e37 48%, #be1e37 52%, #f0e6d2 52%, #f0e6d2 100%)';
+                }
             }
+            
+            const isSelected = (skinData.productType !== null && index === 0) || 
+                              (skinData.productType === null && index === 0 && chromas.length > 0);
             
             html += `
                 <li>
-                    <div class="chroma-native-button" data-id="${chroma.id}" data-name="${chroma.name}" data-is-chroma="true">
+                    <div class="chroma-native-button ${isSelected ? 'selected' : ''}" 
+                         data-id="${chroma.id}" 
+                         data-name="${chroma.name}" 
+                         data-is-chroma="${skinData.productType === null}"
+                         data-is-tiered="${skinData.productType !== null}"
+                         data-index="${index}">
                         <div class="native-contents" style="background:${colorStyle}"></div>
                     </div>
                 </li>
@@ -741,20 +809,33 @@ chromas.forEach((chroma, index) => {
         const previewImage = panel.querySelector('.chroma-native-image');
         const previewName = panel.querySelector('.chroma-native-skin-name');
         
-        const defaultPreviewPath = skinData.chromaPreviewPath || skinData.splashPath || skinData.tilePath || '';
+        const defaultPreviewPath = skinData.chromaPreviewPath || skinData.tilePath || '';
+        
+        let currentPreviewPath = defaultPreviewPath;
+        let currentSkinName = skinData.name;
+        
+        if (skinData.productType !== null && chromas.length > 0) {
+            const firstChroma = chromas[0];
+            currentPreviewPath = firstChroma.chromaPreviewPath || firstChroma.tilePath || defaultPreviewPath;
+            currentSkinName = firstChroma.name;
+            previewImage.style.backgroundImage = `url('${currentPreviewPath}')`;
+            previewName.textContent = currentSkinName;
+        }
         
         chromaButtons.forEach(chromaButton => {
             const chromaId = parseInt(chromaButton.dataset.id);
             const isChroma = chromaButton.dataset.isChroma === 'true';
+            const isTiered = chromaButton.dataset.isTiered === 'true';
+            const chromaIndex = parseInt(chromaButton.dataset.index);
             
             chromaButton.addEventListener('mouseenter', () => {
-                if (chromaId === skinData.id) {
+                if (!isChroma && !isTiered) {
                     previewImage.style.backgroundImage = `url('${defaultPreviewPath}')`;
                     previewName.textContent = skinData.name;
                 } else {
-                    const selectedChroma = chromas.find(c => c.id === chromaId);
+                    const selectedChroma = chromas[chromaIndex];
                     if (selectedChroma) {
-                        const previewPath = selectedChroma.chromaPreviewPath || selectedChroma.splashPath || defaultPreviewPath;
+                        const previewPath = selectedChroma.chromaPreviewPath || selectedChroma.tilePath || '';
                         previewImage.style.backgroundImage = `url('${previewPath}')`;
                         previewName.textContent = selectedChroma.name;
                     }
@@ -765,14 +846,17 @@ chromas.forEach((chroma, index) => {
                 const selectedButton = panel.querySelector('.chroma-native-button.selected');
                 if (selectedButton) {
                     const selectedId = parseInt(selectedButton.dataset.id);
+                    const selectedIsChroma = selectedButton.dataset.isChroma === 'true';
+                    const selectedIsTiered = selectedButton.dataset.isTiered === 'true';
+                    const selectedIndex = parseInt(selectedButton.dataset.index);
                     
-                    if (selectedId === skinData.id) {
+                    if (!selectedIsChroma && !selectedIsTiered) {
                         previewImage.style.backgroundImage = `url('${defaultPreviewPath}')`;
                         previewName.textContent = skinData.name;
                     } else {
-                        const selectedChroma = chromas.find(c => c.id === selectedId);
+                        const selectedChroma = chromas[selectedIndex];
                         if (selectedChroma) {
-                            const previewPath = selectedChroma.chromaPreviewPath || selectedChroma.splashPath || defaultPreviewPath;
+                            const previewPath = selectedChroma.chromaPreviewPath || selectedChroma.tilePath || '';
                             previewImage.style.backgroundImage = `url('${previewPath}')`;
                             previewName.textContent = selectedChroma.name;
                         }
@@ -789,7 +873,7 @@ chromas.forEach((chroma, index) => {
                 
                 chromaButton.classList.add('selected');
                 
-                if (chromaId === skinData.id) {
+                if (!isChroma && !isTiered) {
                     previewImage.style.backgroundImage = `url('${defaultPreviewPath}')`;
                     previewName.textContent = skinData.name;
                     
@@ -799,9 +883,9 @@ chromas.forEach((chroma, index) => {
                         buttonContent.style.backgroundSize = 'contain';
                     }
                 } else {
-                    const selectedChroma = chromas.find(c => c.id === chromaId);
+                    const selectedChroma = chromas[chromaIndex];
                     if (selectedChroma) {
-                        const previewPath = selectedChroma.chromaPreviewPath || selectedChroma.splashPath || defaultPreviewPath;
+                        const previewPath = selectedChroma.chromaPreviewPath || selectedChroma.tilePath || '';
                         previewImage.style.backgroundImage = `url('${previewPath}')`;
                         previewName.textContent = selectedChroma.name;
                         
@@ -812,12 +896,20 @@ chromas.forEach((chroma, index) => {
                                 buttonContent.style.background = `linear-gradient(135deg, ${colors[0]} 0%, ${colors[0]} 50%, ${colors[1]} 50%, ${colors[1]} 100%)`;
                             } else if (colors.length === 1) {
                                 buttonContent.style.background = colors[0];
+                            } else if (skinData.productType !== null) {
+                                const presetColors = [
+                                    ['#FF6B6B', '#4ECDC4'],
+                                    ['#45B7D1', '#96C93D'],
+                                    ['#FECA57', '#FF9FF3'],
+                                ];
+                                const colorPair = presetColors[chromaIndex % presetColors.length];
+                                buttonContent.style.background = `linear-gradient(135deg, ${colorPair[0]} 0%, ${colorPair[0]} 50%, ${colorPair[1]} 50%, ${colorPair[1]} 100%)`;
                             }
                         }
                     }
                 }
                 
-                this.callNpcSkinMessenger(chromaButton, skinData, chromas);
+                this.callNpcSkinMessenger(chromaButton, skinData, chromas, chromaIndex);
                 
                 this.removeChromaPanel();
             });
@@ -836,34 +928,37 @@ chromas.forEach((chroma, index) => {
         }, 100);
     }
     
-    callNpcSkinMessenger(chromaButton, baseSkinData, chromas) {
+    callNpcSkinMessenger(chromaButton, baseSkinData, chromas, chromaIndex) {
         const chromaId = parseInt(chromaButton.dataset.id);
         const isChroma = chromaButton.dataset.isChroma === 'true';
+        const isTiered = chromaButton.dataset.isTiered === 'true';
         
         let skinInfo = {};
         
-        if (isChroma) {
-            const chromaData = chromas.find(c => c.id === chromaId);
+        if (isChroma || isTiered) {
+            const chromaData = chromas[chromaIndex];
             if (chromaData) {
                 skinInfo = {
                     id: chromaData.id,
                     name: chromaData.name,
-                    isChroma: true
+                    isChroma: isChroma,
+                    isTiered: isTiered,
+                    index: chromaIndex
                 };
             }
         } else {
             skinInfo = {
                 id: baseSkinData.id,
                 name: baseSkinData.name,
-                isChroma: false
+                isChroma: false,
+                isTiered: false
             };
         }
         
         if (window.NpcSkinMessenger && typeof window.NpcSkinMessenger.sendSkinMessage === 'function') {
             try {
                 window.NpcSkinMessenger.sendSkinMessage(skinInfo);
-            } catch (error) {
-            }
+            } catch (error) {}
         }
     }
     
@@ -880,11 +975,16 @@ chromas.forEach((chroma, index) => {
         this.state.currentSkinName = null;
         this.state.currentSkinData = null;
         this.state.skinMap.clear();
-        this.state.isActive = false;
         this.state.isInChampSelect = false;
         this.state.lastSkinCheckTime = 0;
         this.state.lastLoggedSkin = null;
         this.state.lastProcessedSkinName = null;
+        this.state.isWebSocketConnected = false;
+        
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+            this.debounceTimer = null;
+        }
         
         this.removeChromaButton();
         this.removeChromaPanel();
@@ -902,24 +1002,50 @@ chromas.forEach((chroma, index) => {
             this.observer = null;
         }
         
-        if (this.timers.skinCheck) {
-            clearInterval(this.timers.skinCheck);
-            this.timers.skinCheck = null;
-        }
-        
         if (this.timers.buttonCheck) {
             clearTimeout(this.timers.buttonCheck);
             this.timers.buttonCheck = null;
+        }
+        
+        if (this.timers.webSocketReconnect) {
+            clearTimeout(this.timers.webSocketReconnect);
+            this.timers.webSocketReconnect = null;
+        }
+        
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+            this.debounceTimer = null;
+        }
+        
+        if (this.webSocket) {
+            try {
+                this.webSocket.close();
+            } catch (error) {}
+            this.webSocket = null;
+        }
+        
+        const styleEl = document.getElementById('skin-chroma-enhancer-native-style');
+        if (styleEl) {
+            styleEl.remove();
         }
         
         window.skinChromaEnhancer = null;
     }
 }
 
-window.addEventListener('load', () => {
-    setTimeout(() => {
-        if (!window.skinChromaEnhancer) {
-            window.skinChromaEnhancer = new SkinChromaEnhancer();
-        }
-    }, 3000);
-});
+function startXC() {
+    if (!document.body) {
+        setTimeout(startXC, 100);
+        return;
+    }
+    
+    if (!window.skinChromaEnhancer) {
+        window.skinChromaEnhancer = new SkinChromaEnhancer();
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startXC);
+} else {
+    startXC();
+}
